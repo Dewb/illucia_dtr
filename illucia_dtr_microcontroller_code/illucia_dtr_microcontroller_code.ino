@@ -146,13 +146,24 @@ public:
                     else {
                         valueToSend = 1;
                     }
-                    
+
+#if defined(USB_SERIAL)
+
                     //pack a byte array with data about the state change
                     byte dataToSend[MESSAGE_SIZE] = {
                         DIGITAL_TYPE, lowByte(_id), valueToSend, 255
                     }; //dummy byte at the end - easier to send everything as packets of the same size.. might change this down the road if there is some need to send arbitrary data.
                     Serial.write(dataToSend, MESSAGE_SIZE); //send it over serial.
                     
+#elif defined(USB_MIDI)
+
+                    if (valueToSend == 1) {
+                      usbMIDI.sendNoteOn(60 + _id, 127, 1);
+                    } else {
+                      usbMIDI.sendNoteOff(60 + _id, 0, 1);
+                    }
+                    
+#endif
                 }
             }
             else { //this is the first time we've read a state change, and thus should prepare a debounce, re-read after a delay
@@ -170,7 +181,7 @@ public:
     
     int _previousRead; //used to keep track of readings in order to average / minimize noise on the analog readings
     
-    int updateState() {
+    void updateState() {
         
         int reading = analogRead(_pinNumber);
         
@@ -186,13 +197,24 @@ public:
               reading = 1023;
             }
             
-            
+#if defined(USB_SERIAL)
+
             //send update!
             byte bytesToSend[MESSAGE_SIZE] = {
                 CONTINUOUS_TYPE, _id, highByte(reading), lowByte(reading)
             };
             Serial.write(bytesToSend, MESSAGE_SIZE);
             
+#elif defined(USB_MIDI)
+
+            // pitch bend
+            // usbMIDI.send(0xE0, reading << 4, reading >> 3, 2 + _id, 0);
+
+            // MSB/LSB CC values
+            usbMIDI.sendControlChange(14 + _id, reading >> 3, 1);
+            usbMIDI.sendControlChange(46 + _id, (reading & 0x3) << 4, 1);
+            
+#endif
             //update internal state  
             _previousRead = reading;
         }
@@ -247,11 +269,17 @@ public:
                             else {
                                 value = 1;
                             }
-                            
+
+#if defined(USB_SERIAL)
                             byte dataToSend[MESSAGE_SIZE] = {
                                 JACK_TYPE, lowByte(_id), lowByte(i), value
                             }; //make a byte array to send over serial. indicate the type of message, the two jacks, and their connection status
                             Serial.write(dataToSend, MESSAGE_SIZE); //send it over serial.
+#elif defined(USB_MIDI)
+                            if (i > _id) {
+                              usbMIDI.sendControlChange(21 + i, value * 127, _id + 1); 
+                            }
+#endif
                         }
                     }
                     else { //this is the first time we've read a state change, and thus should prepare a debounce, re-read after a delay
@@ -292,10 +320,32 @@ void updateJacks() {
     }
 }
 
+#if defined(USB_MIDI)
+
+void handleNoteOn(byte channel, byte note, byte velocity) {
+    if (channel == 1 && note >= 60 && note < 60 + NUMBER_OF_LEDS) {
+        analogWrite(ledPins[note - 60], (velocity & 0x7f) << 1);
+    }
+}
+
+void handleNoteOff(byte channel, byte note, byte velocity) {
+    if (channel == 1 && note >= 60 && note < 60 + NUMBER_OF_LEDS) {
+        analogWrite(ledPins[note - 60], 0);
+    }
+}
+
+#endif
+
+
 void setup() {
-    
+  
+#if defined(USB_SERIAL)
     Serial.begin(9600);
-    
+#elif defined(USB_MIDI)
+    usbMIDI.setHandleNoteOn(handleNoteOn);
+    usbMIDI.setHandleNoteOff(handleNoteOff);
+#endif
+  
     //setup pins, engage pull ups
     for (int i = 0; i < NUMBER_OF_DIGITAL_ELEMENTS; i++) {
         
@@ -340,21 +390,25 @@ void setup() {
 }
 
 
+
 void loop() {
 
     digitalWrite(6, HIGH);
+
     if (needsHandshake) {
-        
+         
+#if defined(USB_SERIAL)
         //do serial handshake. 
         byte initMessage[MESSAGE_SIZE] = {
             'd', 'e', 't', 'r'
         };
+        
         while (Serial.available () <= 0) {
             Serial.write(initMessage, MESSAGE_SIZE);
             delay(1000);
         }
         Serial.flush();
-        
+#endif
         needsHandshake = false;
         
         for (int j = 0; j < 2; j++) {
@@ -364,17 +418,23 @@ void loop() {
                 analogWrite(ledPins[i], 0);
             }
         }
+
         
     } else {
-        
+
         //update elements
         updateDigitalElements();
         updateContinuousElements();
         updateJacks();
-        
-        
+
+#if defined(USB_MIDI)
+        usbMIDI.send_now();
+#endif
+
         delay(1);
-        //
+
+#if defined(USB_SERIAL)
+
         while (Serial.available () > 0) {
             
             //illucia also recieves serial messages            
@@ -404,7 +464,15 @@ void loop() {
                 Serial.flush();
             }
         }
-        
+
+#elif defined(USB_MIDI)
+
+        while(usbMIDI.read()) {
+          // todo: use note on or CCs to toggle LEDs
+        }
+
+#endif
+
     }
 }
 
